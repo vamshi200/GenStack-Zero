@@ -1,0 +1,5 @@
+faiss-cpu
+fastapi
+sentence-transformers
+uvicorn
+pytest
