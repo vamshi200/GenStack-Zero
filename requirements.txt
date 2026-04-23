@@ -1,5 +1,6 @@
 faiss-cpu
 fastapi
 sentence-transformers
+transformers
 uvicorn
 pytest

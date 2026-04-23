@@ -1,0 +1,19 @@
+Large language models, often called LLMs, are AI systems trained on large amounts of text. They can generate answers, summarize documents, write code, and help users explore ideas through natural language.
+
+Retrieval augmented generation, or RAG, combines a language model with a search step. Instead of asking the model to rely only on what it already knows, RAG first retrieves relevant information from documents and then uses that context to answer.
+
+Embeddings are lists of numbers that represent the meaning of text. Similar pieces of text usually have embeddings that are close together, which makes embeddings useful for search and recommendation systems.
+
+Vector databases store embeddings and make it fast to find similar vectors. In a RAG system, a vector database can quickly find the chunks of text that best match a user's question.
+
+FAISS is a popular open-source library for vector search. It is often used in learning projects because it is fast, local, and easy to try before moving to a managed vector database.
+
+LoRA is a technique for fine-tuning large models efficiently. Instead of changing every model weight, LoRA trains small adapter layers, which can reduce memory use and training cost.
+
+QLoRA makes fine-tuning even more memory efficient by using quantization. It allows developers to train useful adapters for large models on smaller hardware than full fine-tuning would require.
+
+DoRA is another adapter-based fine-tuning method. It separates direction and magnitude during training, which can improve quality while still keeping the tuning process efficient.
+
+GPUs are important for many AI workloads because they can perform many math operations in parallel. They are commonly used for training models, running embeddings, and serving large neural networks.
+
+FastAPI is a Python framework for building web APIs. It is popular for AI projects because it is simple, fast, and makes it easy to expose model or retrieval functionality through HTTP endpoints.
