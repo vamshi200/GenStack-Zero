@@ -32,6 +32,7 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     chunks: list[str]
+    used_context: str
     count: int
 
 
@@ -65,14 +66,80 @@ def build_rag_index() -> None:
 
 def create_prompt(question: str, chunks: list[str]) -> str:
     """Build the prompt that sends retrieved context to the generator."""
-    context = "\n\n".join(chunks)
+    context = build_context(chunks)
 
     return (
-        "Answer the question using the context below:\n\n"
+        "Answer the question using only the context below in 2 to 4 sentences. "
+        "If the context is not enough, say: I could not find enough context to answer this question.\n\n"
         f"{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
     )
+
+
+def build_context(chunks: list[str]) -> str:
+    """Join retrieved chunks into the exact context sent to the model."""
+    return "\n\n".join(chunks)
+
+
+def is_relevant(question: str, chunk: str, score: float) -> bool:
+    """Apply a simple relevance check before using a chunk."""
+    question_words = {word.strip(".,?!:;").lower() for word in question.split()}
+    chunk_words = {word.strip(".,?!:;").lower() for word in chunk.split()}
+
+    # Ignore tiny words so the overlap check stays simple and useful.
+    meaningful_question_words = {
+        word for word in question_words if len(word) > 2
+    }
+    overlap = meaningful_question_words.intersection(chunk_words)
+
+    # Lower FAISS distance is better. We also want at least one shared keyword.
+    return bool(overlap) and score < 1.5
+
+
+def limit_answer_sentences(answer: str, max_sentences: int = 4) -> str:
+    """Keep only the first few sentences from the generated answer."""
+    sentence_endings = ".!?"
+    sentences: list[str] = []
+    current_sentence = ""
+
+    for character in answer:
+        current_sentence += character
+
+        if character in sentence_endings:
+            cleaned_sentence = current_sentence.strip()
+            if cleaned_sentence:
+                sentences.append(cleaned_sentence)
+            current_sentence = ""
+
+        if len(sentences) >= max_sentences:
+            break
+
+    if not sentences and answer.strip():
+        return answer.strip()
+
+    return " ".join(sentences).strip()
+
+
+def extract_fallback_answer(chunks: list[str]) -> str:
+    """Use the first relevant chunk as a safe fallback answer."""
+    if not chunks:
+        return "I could not find enough context to answer this question."
+
+    # The first chunk is already the closest one from retrieval.
+    return limit_answer_sentences(chunks[0], max_sentences=2)
+
+
+def is_answer_grounded(answer: str, context: str) -> bool:
+    """Check whether the generated answer overlaps enough with the context."""
+    answer_words = {word.strip(".,?!:;").lower() for word in answer.split()}
+    context_words = {word.strip(".,?!:;").lower() for word in context.split()}
+
+    meaningful_answer_words = {word for word in answer_words if len(word) > 3}
+    overlap = meaningful_answer_words.intersection(context_words)
+
+    # Require some shared vocabulary so obviously off-context answers are filtered.
+    return len(overlap) >= 2
 
 
 def generate_answer(question: str, chunks: list[str]) -> str:
@@ -82,6 +149,7 @@ def generate_answer(question: str, chunks: list[str]) -> str:
         raise HTTPException(status_code=503, detail="Text generator is not ready")
 
     prompt = create_prompt(question, chunks)
+    context = build_context(chunks)
 
     # Convert the prompt into token IDs that the model can understand.
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
@@ -95,8 +163,18 @@ def generate_answer(question: str, chunks: list[str]) -> str:
 
     # Decode token IDs back into readable text.
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+    answer = limit_answer_sentences(answer)
 
-    return answer or "I could not generate an answer from the retrieved context."
+    if not answer:
+        return extract_fallback_answer(chunks)
+
+    if answer == "I could not find enough context to answer this question.":
+        return answer
+
+    if not is_answer_grounded(answer, context):
+        return extract_fallback_answer(chunks)
+
+    return answer
 
 
 @app.on_event("startup")
@@ -127,14 +205,27 @@ def query(request: QueryRequest) -> QueryResponse:
 
     # Embed the question and search for the closest chunks in FAISS.
     question_embedding = embedder.embed_query(question)
-    chunks = vector_store.search(question_embedding, top_k=request.top_k)
-    answer = generate_answer(question, chunks)
+    results = vector_store.search_with_scores(question_embedding, top_k=request.top_k)
+
+    # Keep only chunks that pass a basic relevance check.
+    relevant_chunks = [
+        result["chunk"]
+        for result in results
+        if is_relevant(question, str(result["chunk"]), float(result["score"]))
+    ]
+    used_context = build_context(relevant_chunks)
+
+    if not relevant_chunks:
+        answer = "I could not find enough context to answer this question."
+    else:
+        answer = generate_answer(question, relevant_chunks)
 
     return QueryResponse(
         question=question,
         answer=answer,
-        chunks=chunks,
-        count=len(chunks),
+        chunks=relevant_chunks,
+        used_context=used_context,
+        count=len(relevant_chunks),
     )
 
 

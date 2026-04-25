@@ -23,11 +23,34 @@ class VectorStore:
 
     def search(self, query_embedding: list[float], top_k: int = 3) -> list[str]:
         """Return the most similar text chunks for a query embedding."""
+        results = self.search_with_scores(query_embedding, top_k=top_k)
+
+        return [result["chunk"] for result in results]
+
+    def search_with_scores(
+        self,
+        query_embedding: list[float],
+        top_k: int = 3,
+    ) -> list[dict[str, float | str]]:
+        """Return matching chunks together with their FAISS distance scores."""
         if self.index.ntotal == 0:
             return []
 
         query_vector = np.array([query_embedding], dtype="float32")
-        _, indices = self.index.search(query_vector, top_k)
+        distances, indices = self.index.search(query_vector, top_k)
 
-        # FAISS returns -1 when it cannot fill all requested results.
-        return [self.texts[index] for index in indices[0] if index != -1]
+        results: list[dict[str, float | str]] = []
+
+        # Smaller L2 distance means the chunk is closer to the question.
+        for distance, index in zip(distances[0], indices[0]):
+            if index == -1:
+                continue
+
+            results.append(
+                {
+                    "chunk": self.texts[index],
+                    "score": float(distance),
+                }
+            )
+
+        return results
