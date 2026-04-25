@@ -4,3 +4,5 @@ sentence-transformers
 transformers
 uvicorn
 pytest
+requests
+streamlit
