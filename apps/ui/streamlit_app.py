@@ -33,6 +33,14 @@ def render_assistant_message(message: dict) -> None:
     st.markdown("**Answer**")
     st.write(message["answer"])
 
+    answer_source = message.get("answer_source")
+    if answer_source == "knowledge_base":
+        st.caption("Source: Generative AI knowledge base")
+    elif answer_source == "not_enough_context" and message.get("used_context"):
+        st.caption("Source: Knowledge base had limited relevant context")
+    elif answer_source == "not_enough_context":
+        st.caption("Source: Outside the supported Generative AI domain")
+
     with st.expander("Used Context", expanded=False):
         used_context = message.get("used_context", "")
         if used_context:
@@ -61,6 +69,8 @@ with header_left:
 
 with header_right:
     st.button("Clear Chat", on_click=clear_chat, use_container_width=True)
+
+st.caption("This assistant answers only Generative AI related questions using a fixed internal knowledge base.")
 
 # Replay the existing conversation so the UI feels like a chat app.
 for message in st.session_state.messages:
@@ -93,6 +103,7 @@ if question:
                 assistant_message = {
                     "role": "assistant",
                     "answer": result.get("answer", "No answer returned."),
+                    "answer_source": result.get("answer_source", ""),
                     "used_context": result.get("used_context", ""),
                     "chunks": result.get("chunks", []),
                 }
@@ -105,6 +116,7 @@ if question:
                         "Could not reach the FastAPI server. "
                         "Make sure the API is running on http://127.0.0.1:8000."
                     ),
+                    "answer_source": "",
                     "used_context": "",
                     "chunks": [],
                 }

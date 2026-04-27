@@ -6,3 +6,4 @@ uvicorn
 pytest
 requests
 streamlit
+PyMuPDF

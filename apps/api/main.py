@@ -2,7 +2,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from src.embeddings.embedder import Embedder
 from src.ingestion.load_documents import load_text_file
@@ -15,8 +14,6 @@ app = FastAPI(title="GenStack-Zero API")
 # These globals keep the demo simple: the app builds one in-memory index.
 embedder: Embedder | None = None
 vector_store: VectorStore | None = None
-tokenizer = None
-generation_model = None
 
 
 class QueryRequest(BaseModel):
@@ -31,23 +28,38 @@ class QueryResponse(BaseModel):
 
     question: str
     answer: str
+    answer_source: str
     chunks: list[str]
     used_context: str
     count: int
 
 
-def build_rag_index() -> None:
-    """Load documents, chunk them, embed them, and store them in FAISS."""
-    global embedder, vector_store, tokenizer, generation_model
+def build_chunks_from_text(text: str, file_name: str) -> list[str]:
+    """Turn the master guide into metadata-rich chunks."""
+    chunks: list[str] = []
+    text_chunks = [chunk.strip() for chunk in text.split("\n\n") if chunk.strip()]
+
+    for text_chunk in text_chunks:
+        # Keep one simple source header so retrieval stays easy to inspect.
+        chunks.append(f"File: {file_name} | Type: .txt\n{text_chunk}")
+
+    return chunks
+
+
+def build_rag_index() -> dict[str, int]:
+    """Load the fixed GenAI guide, embed it, and store it in FAISS."""
+    global embedder, vector_store
 
     project_root = Path(__file__).resolve().parents[2]
-    sample_file = project_root / "data" / "raw" / "sample_docs.txt"
+    guide_file = project_root / "data" / "raw" / "genai_master_guide.txt"
 
-    # Load the sample text file as one document.
-    document = load_text_file(str(sample_file))
+    # This system now uses one curated Generative AI knowledge file.
+    guide_documents = load_text_file(str(guide_file))
+    guide_text = guide_documents[0]["text"]
+    chunks = build_chunks_from_text(guide_text, guide_file.name)
 
-    # Split the sample file by paragraph so each topic stays easy to retrieve.
-    chunks = [chunk.strip() for chunk in document.split("\n\n") if chunk.strip()]
+    if not chunks:
+        raise ValueError("The GenAI master guide did not contain any readable text")
 
     # Create embeddings for every chunk.
     embedder = Embedder()
@@ -58,28 +70,28 @@ def build_rag_index() -> None:
     vector_store = VectorStore(dimension=embedding_dimension)
     vector_store.add(chunks, embeddings)
 
-    # flan-t5-small is a lightweight open-source model that follows prompts well.
-    model_name = "google/flan-t5-small"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    generation_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-
-
-def create_prompt(question: str, chunks: list[str]) -> str:
-    """Build the prompt that sends retrieved context to the generator."""
-    context = build_context(chunks)
-
-    return (
-        "Answer the question using only the context below in 2 to 4 sentences. "
-        "If the context is not enough, say: I could not find enough context to answer this question.\n\n"
-        f"{context}\n\n"
-        f"Question: {question}\n"
-        "Answer:"
-    )
+    return {
+        "document_count": 1,
+        "chunk_count": len(chunks),
+    }
 
 
 def build_context(chunks: list[str]) -> str:
     """Join retrieved chunks into the exact context sent to the model."""
     return "\n\n".join(chunks)
+
+
+def build_not_enough_context_answer() -> str:
+    """Return a safe message when the knowledge base cannot support an answer."""
+    return (
+        "The knowledge base does not contain enough information to answer this "
+        "question in a reliable way."
+    )
+
+
+def build_out_of_scope_answer() -> str:
+    """Return the fixed message for non-GenAI questions."""
+    return "This system is designed to answer only Generative AI related questions."
 
 
 def is_relevant(question: str, chunk: str, score: float) -> bool:
@@ -97,37 +109,129 @@ def is_relevant(question: str, chunk: str, score: float) -> bool:
     return bool(overlap) and score < 1.5
 
 
-def limit_answer_sentences(answer: str, max_sentences: int = 4) -> str:
-    """Keep only the first few sentences from the generated answer."""
-    sentence_endings = ".!?"
-    sentences: list[str] = []
-    current_sentence = ""
+def extract_question_keywords(question: str) -> tuple[list[str], list[str]]:
+    """Split a question into broad keywords and more topic-specific keywords."""
+    stop_words = {
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "which",
+        "who",
+        "does",
+        "do",
+        "is",
+        "are",
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "of",
+        "to",
+        "for",
+        "with",
+        "and",
+        "or",
+        "about",
+        "detail",
+        "detailed",
+        "simple",
+        "example",
+        "explain",
+    }
+    generic_domain_words = {
+        "ai",
+        "genai",
+        "model",
+        "models",
+        "language",
+        "system",
+        "systems",
+        "application",
+        "applications",
+    }
 
-    for character in answer:
-        current_sentence += character
+    all_keywords = [
+        word.strip(".,?!:;").lower()
+        for word in question.split()
+        if len(word.strip(".,?!:;")) > 2
+    ]
+    meaningful_keywords = [word for word in all_keywords if word not in stop_words]
+    specific_keywords = [
+        word for word in meaningful_keywords if word not in generic_domain_words
+    ]
 
-        if character in sentence_endings:
-            cleaned_sentence = current_sentence.strip()
-            if cleaned_sentence:
-                sentences.append(cleaned_sentence)
-            current_sentence = ""
+    return meaningful_keywords, specific_keywords
 
-        if len(sentences) >= max_sentences:
-            break
 
-    if not sentences and answer.strip():
-        return answer.strip()
+def is_genai_question(question: str) -> bool:
+    """Check whether a question is about Generative AI topics."""
+    genai_keywords = {
+        "generative",
+        "genai",
+        "llm",
+        "llms",
+        "token",
+        "tokens",
+        "tokenization",
+        "embedding",
+        "embeddings",
+        "vector",
+        "vectors",
+        "database",
+        "databases",
+        "rag",
+        "chunking",
+        "retrieval",
+        "reranking",
+        "prompt",
+        "prompting",
+        "hallucination",
+        "guardrails",
+        "fine-tuning",
+        "finetuning",
+        "peft",
+        "lora",
+        "qlora",
+        "dora",
+        "quantization",
+        "gpu",
+        "gpus",
+        "vram",
+        "cuda",
+        "inference",
+        "batching",
+        "fastapi",
+        "streamlit",
+        "faiss",
+        "langchain",
+        "llamaindex",
+        "agent",
+        "agents",
+        "multimodal",
+        "transformer",
+        "transformers",
+        "copilot",
+    }
 
-    return " ".join(sentences).strip()
+    lower_question = question.lower()
+    meaningful_keywords, specific_keywords = extract_question_keywords(question)
+
+    if any(keyword in lower_question for keyword in genai_keywords):
+        return True
+
+    return any(keyword in genai_keywords for keyword in meaningful_keywords + specific_keywords)
 
 
 def extract_fallback_answer(chunks: list[str]) -> str:
     """Use the first relevant chunk as a safe fallback answer."""
     if not chunks:
-        return "I could not find enough context to answer this question."
+        return build_not_enough_context_answer()
 
     # The first chunk is already the closest one from retrieval.
-    return limit_answer_sentences(chunks[0], max_sentences=2)
+    return chunks[0].strip()
 
 
 def is_answer_grounded(answer: str, context: str) -> bool:
@@ -142,39 +246,195 @@ def is_answer_grounded(answer: str, context: str) -> bool:
     return len(overlap) >= 2
 
 
-def generate_answer(question: str, chunks: list[str]) -> str:
-    """Generate a short answer from the retrieved chunks."""
-    if tokenizer is None or generation_model is None:
-        # This should not happen after startup, but it keeps the error clear.
-        raise HTTPException(status_code=503, detail="Text generator is not ready")
+def split_into_sentences(text: str) -> list[str]:
+    """Split text into simple sentence-like pieces."""
+    normalized_text = text.replace("\n", " ")
+    sentences: list[str] = []
+    current_sentence = ""
 
-    prompt = create_prompt(question, chunks)
+    for character in normalized_text:
+        current_sentence += character
+        if character in ".!?":
+            cleaned_sentence = current_sentence.strip()
+            if cleaned_sentence:
+                sentences.append(cleaned_sentence)
+            current_sentence = ""
+
+    if current_sentence.strip():
+        sentences.append(current_sentence.strip())
+
+    return sentences
+
+
+def clean_chunk_text(chunk: str) -> str:
+    """Remove the metadata header line from a retrieved chunk."""
+    lines = chunk.splitlines()
+    if len(lines) <= 1:
+        return chunk.strip()
+
+    return "\n".join(lines[1:]).strip()
+
+
+def collect_context_sentences(chunks: list[str]) -> list[str]:
+    """Collect readable sentences from retrieved chunks."""
+    sentences: list[str] = []
+
+    for chunk in chunks:
+        chunk_text = clean_chunk_text(chunk)
+        sentences.extend(split_into_sentences(chunk_text))
+
+    return sentences
+
+
+def select_sentences(
+    sentences: list[str],
+    keywords: list[str],
+    max_sentences: int = 3,
+) -> list[str]:
+    """Pick sentences that best match a small set of topic keywords."""
+    selected: list[str] = []
+
+    for sentence in sentences:
+        lower_sentence = sentence.lower()
+        if any(keyword in lower_sentence for keyword in keywords):
+            selected.append(sentence)
+        if len(selected) >= max_sentences:
+            break
+
+    # Fall back to the earliest sentences if no keyword match is found.
+    if not selected:
+        selected = sentences[:max_sentences]
+
+    return selected
+
+
+def format_section(title: str, paragraphs: list[str]) -> str:
+    """Format one answer section with a markdown heading."""
+    body = " ".join(paragraphs).strip()
+
+    if not body:
+        body = (
+            "The knowledge base needs more information to explain this part in detail."
+        )
+
+    return f"**{title}**\n{body}"
+
+
+def build_step_by_step_section(sentences: list[str]) -> str:
+    """Create a simple step-by-step explanation from retrieved context."""
+    steps = [
+        "The system starts with a user question and turns it into an embedding so it can search semantically.",
+        "It searches the indexed knowledge base to find the chunks that are most relevant to the question.",
+        "Those chunks are combined into context and used as the main evidence for the final answer.",
+        "The answer generator then explains the topic using that grounded context instead of guessing from memory alone.",
+    ]
+
+    matching_sentences = select_sentences(
+        sentences,
+        keywords=["retrieve", "retrieval", "context", "embedding", "search", "chunk"],
+        max_sentences=2,
+    )
+    if matching_sentences:
+        steps.extend(matching_sentences)
+
+    numbered_steps = [f"{index}. {step}" for index, step in enumerate(steps, start=1)]
+
+    return "**How It Works Step by Step**\n" + "\n".join(numbered_steps)
+
+
+def build_detailed_answer(question: str, chunks: list[str]) -> str:
+    """Build a long, structured answer directly from retrieved context."""
     context = build_context(chunks)
+    sentences = collect_context_sentences(chunks)
 
-    # Convert the prompt into token IDs that the model can understand.
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+    if len(sentences) < 4:
+        return ""
 
-    # Keep generation short so the demo responds quickly.
-    outputs = generation_model.generate(
-        **inputs,
-        max_new_tokens=60,
-        do_sample=False,
+    topic_keywords, specific_keywords = extract_question_keywords(question)
+
+    definition_sentences = select_sentences(
+        sentences,
+        keywords=topic_keywords + ["is", "are", "called"],
+        max_sentences=2,
+    )
+    importance_sentences = select_sentences(
+        sentences,
+        keywords=["important", "useful", "matters", "reduce", "improve", "performance"],
+        max_sentences=3,
+    )
+    detail_sentences = select_sentences(
+        sentences,
+        keywords=topic_keywords + ["works", "context", "model", "retrieval", "generation"],
+        max_sentences=4,
+    )
+    example_sentences = select_sentences(
+        sentences,
+        keywords=["example", "for example", "customer support", "assistant", "workflow"],
+        max_sentences=3,
+    )
+    application_sentences = select_sentences(
+        sentences,
+        keywords=["businesses", "teams", "enterprise", "applications", "used", "product"],
+        max_sentences=3,
+    )
+    genai_sentences = select_sentences(
+        sentences,
+        keywords=["generative ai", "llm", "hallucination", "grounded", "runtime", "knowledge base"],
+        max_sentences=3,
     )
 
-    # Decode token IDs back into readable text.
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-    answer = limit_answer_sentences(answer)
+    answer_sections = [
+        format_section("Simple Definition", definition_sentences),
+        format_section("Detailed Explanation", detail_sentences + importance_sentences[:2]),
+        build_step_by_step_section(sentences),
+        format_section("Simple Example", example_sentences),
+        format_section("Real-World Applications", application_sentences),
+        format_section("Why It Matters in Generative AI", genai_sentences + importance_sentences[:1]),
+    ]
 
-    if not answer:
-        return extract_fallback_answer(chunks)
-
-    if answer == "I could not find enough context to answer this question.":
-        return answer
+    answer = "\n\n".join(answer_sections)
 
     if not is_answer_grounded(answer, context):
-        return extract_fallback_answer(chunks)
+        return ""
 
     return answer
+
+
+def has_strong_topic_coverage(question: str, chunks: list[str]) -> bool:
+    """Check whether the retrieved context really covers the main topic."""
+    context_text = build_context(chunks).lower()
+    meaningful_keywords, specific_keywords = extract_question_keywords(question)
+
+    if specific_keywords:
+        matched_specific_keywords = [
+            keyword for keyword in specific_keywords if keyword in context_text
+        ]
+        if len(specific_keywords) >= 2:
+            return len(matched_specific_keywords) >= 2
+
+        return len(matched_specific_keywords) >= 1
+
+    matched_meaningful_keywords = [
+        keyword for keyword in meaningful_keywords if keyword in context_text
+    ]
+
+    return len(matched_meaningful_keywords) >= max(1, len(meaningful_keywords) // 2)
+
+
+def is_strong_context(question: str, results: list[dict[str, float | str]]) -> bool:
+    """Decide whether retrieval is strong enough for a knowledge-base answer."""
+    chunks = [str(result["chunk"]) for result in results]
+
+    if not has_strong_topic_coverage(question, chunks):
+        return False
+
+    if len(results) >= 2:
+        return True
+
+    if len(results) == 1 and float(results[0]["score"]) < 0.8:
+        return True
+
+    return False
 
 
 @app.on_event("startup")
@@ -192,7 +452,7 @@ def health() -> dict[str, str]:
 
 @app.post("/query")
 def query(request: QueryRequest) -> QueryResponse:
-    """Retrieve chunks and generate a short answer for a user question."""
+    """Retrieve chunks and generate a detailed answer for a user question."""
     question = request.question.strip()
 
     if not question:
@@ -203,26 +463,48 @@ def query(request: QueryRequest) -> QueryResponse:
         # This should not happen after startup, but it keeps the error clear.
         raise HTTPException(status_code=503, detail="RAG index is not ready")
 
+    if not is_genai_question(question):
+        return QueryResponse(
+            question=question,
+            answer=build_out_of_scope_answer(),
+            answer_source="not_enough_context",
+            chunks=[],
+            used_context="",
+            count=0,
+        )
+
     # Embed the question and search for the closest chunks in FAISS.
     question_embedding = embedder.embed_query(question)
     results = vector_store.search_with_scores(question_embedding, top_k=request.top_k)
 
     # Keep only chunks that pass a basic relevance check.
-    relevant_chunks = [
-        result["chunk"]
+    relevant_results = [
+        result
         for result in results
         if is_relevant(question, str(result["chunk"]), float(result["score"]))
     ]
+    relevant_chunks = [str(result["chunk"]) for result in relevant_results]
     used_context = build_context(relevant_chunks)
 
     if not relevant_chunks:
-        answer = "I could not find enough context to answer this question."
+        answer = build_not_enough_context_answer()
+        answer_source = "not_enough_context"
+    elif is_strong_context(question, relevant_results):
+        answer = build_detailed_answer(question, relevant_chunks)
+
+        if answer:
+            answer_source = "knowledge_base"
+        else:
+            answer = build_not_enough_context_answer()
+            answer_source = "not_enough_context"
     else:
-        answer = generate_answer(question, relevant_chunks)
+        answer = build_not_enough_context_answer()
+        answer_source = "not_enough_context"
 
     return QueryResponse(
         question=question,
         answer=answer,
+        answer_source=answer_source,
         chunks=relevant_chunks,
         used_context=used_context,
         count=len(relevant_chunks),

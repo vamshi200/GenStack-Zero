@@ -1,0 +1,15 @@
+NVIDIA GPUs are widely used for machine learning because they can process many mathematical operations in parallel. This makes them useful for training models and for running model inference in production systems.
+
+CUDA is NVIDIA's software platform for GPU computing. Many AI libraries use CUDA to move tensor operations from the CPU to the GPU for better performance.
+
+VRAM is the memory that lives on the GPU. Large language models need enough VRAM to store model weights, intermediate activations, and input data during inference.
+
+When VRAM is too small, a model may not fit on the GPU at all. In that case, developers may need to use a smaller model, quantization, or offloading to slower memory.
+
+Model inference is the process of using a trained model to generate predictions or answers. For LLMs, inference speed often depends on GPU compute power, available VRAM, and prompt length.
+
+Quantization reduces the memory needed by a model by storing weights with fewer bits. This can help larger models fit into limited VRAM and can sometimes improve inference efficiency.
+
+Batching means sending multiple requests through the model together. Good batching can improve throughput, but it also increases memory use, so VRAM limits still matter.
+
+RAG performance depends on both retrieval speed and generation speed. Fast vector search, efficient embedding models, and enough GPU memory for inference can make a RAG system feel much more responsive.
